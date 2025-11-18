@@ -1,0 +1,246 @@
+import tushare as ts
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+import sys
+
+ts.set_token('d120cc9ff4141572ae51e4f8d1df6a1b857637da305a21c22de91222')
+
+
+def setup_plot_style():
+    """设置图表样式"""
+    plt.rcParams['font.sans-serif'] = ['SimHei', 'Arial']
+    plt.rcParams['axes.unicode_minus'] = False
+    plt.style.use('seaborn-v0_8')
+
+
+def download_stock_data():
+    """下载A股股票数据"""
+    # 选择三只不同行业的A股代表性股票
+    stock_codes = {
+        '600519.SH': '贵州茅台',  # 消费
+        '000858.SZ': '五粮液',  # 消费
+        '601318.SH': '中国平安'  # 金融
+    }
+
+    print("正在从Tushare下载股票数据...")
+
+    # 获取日线数据
+    pro = ts.pro_api()
+    start_date = '20200101'
+    end_date = '20231231'
+
+    all_data = {}
+    for code, name in stock_codes.items():
+        try:
+            df = pro.daily(ts_code=code, start_date=start_date, end_date=end_date)
+            df['trade_date'] = pd.to_datetime(df['trade_date'])
+            df.set_index('trade_date', inplace=True)
+            df.sort_index(inplace=True)
+            all_data[code] = df['close']
+            print(f"成功下载 {name}({code}) 数据，共{len(df)}条记录")
+        except Exception as e:
+            print(f"下载 {name}({code}) 数据失败: {e}")
+            # 使用备用数据
+            return create_sample_data()
+
+    # 合并数据
+    prices = pd.DataFrame(all_data)
+    return prices
+
+
+def create_sample_data():
+    """创建示例数据（当网络不可用时使用）"""
+    print("使用本地示例数据进行演示...")
+    dates = pd.date_range('2020-01-01', '2023-12-31', freq='D')
+    dates = dates[dates.dayofweek < 5]  # 只保留工作日
+
+    np.random.seed(42)
+    n_days = len(dates)
+
+    # 生成模拟股价数据
+    returns_600519 = np.random.normal(0.001, 0.02, n_days)  # 贵州茅台
+    returns_000858 = np.random.normal(0.0008, 0.018, n_days)  # 五粮液
+    returns_601318 = np.random.normal(0.0005, 0.015, n_days)  # 中国平安
+
+    prices_600519 = 1000 * np.exp(np.cumsum(returns_600519))
+    prices_000858 = 200 * np.exp(np.cumsum(returns_000858))
+    prices_601318 = 50 * np.exp(np.cumsum(returns_601318))
+
+    data = {
+        '600519.SH': prices_600519,
+        '000858.SZ': prices_000858,
+        '601318.SH': prices_601318
+    }
+
+    prices = pd.DataFrame(data, index=dates)
+    return prices
+
+
+def calculate_returns(prices):
+    """计算收益率"""
+    returns = prices.pct_change().dropna()
+    return returns
+
+
+def analyze_individual_assets(returns):
+    """分析单只资产表现"""
+    stats = {}
+    for stock in returns.columns:
+        stock_returns = returns[stock]
+        stats[stock] = {
+            '年化收益': (1 + stock_returns.mean()) ** 252 - 1,
+            '年化波动率': stock_returns.std() * np.sqrt(252),
+            '夏普比率': (stock_returns.mean() * 252) / (stock_returns.std() * np.sqrt(252)),
+            '最大回撤': (stock_returns.cumsum().expanding().max() - stock_returns.cumsum()).max()
+        }
+
+    stats_df = pd.DataFrame(stats).T
+    return stats_df
+
+
+def generate_random_portfolios(returns, num_portfolios=10000):
+    """生成随机投资组合"""
+    n_assets = len(returns.columns)
+    results = []
+    weights_record = []
+
+    for _ in range(num_portfolios):
+        weights = np.random.random(n_assets)
+        weights /= np.sum(weights)
+
+        # 计算组合收益和风险
+        port_return = np.dot(weights, returns.mean()) * 252
+        port_volatility = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
+        sharpe_ratio = port_return / port_volatility if port_volatility > 0 else 0
+
+        results.append([port_return, port_volatility, sharpe_ratio])
+        weights_record.append(weights)
+
+    return np.array(results), np.array(weights_record)
+
+
+def find_optimal_portfolio(returns, results, weights_record):
+    """寻找最优组合"""
+    valid_indices = results[:, 1] > 0  # 排除波动率为0的组合
+    if np.sum(valid_indices) == 0:
+        return None
+
+    valid_results = results[valid_indices]
+    valid_weights = weights_record[valid_indices]
+
+    max_sharpe_idx = np.argmax(valid_results[:, 2])
+
+    return {
+        'max_sharpe_return': valid_results[max_sharpe_idx, 0],
+        'max_sharpe_volatility': valid_results[max_sharpe_idx, 1],
+        'max_sharpe_weights': valid_weights[max_sharpe_idx]
+    }
+
+
+def plot_analysis(returns, results, optimal):
+    """绘制分析图表"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'Arial']
+    # 1. 收益率时间序列
+    cumulative_returns = (1 + returns).cumprod()
+    cumulative_returns.plot(ax=ax1, title='累计收益率走势')
+    ax1.set_ylabel('累计收益')
+    ax1.legend()
+    ax1.grid(True)
+
+    # 2. 有效前沿
+    if optimal is not None:
+        scatter = ax2.scatter(results[:, 1], results[:, 0], c=results[:, 2],
+                              cmap='viridis', alpha=0.3, s=1)
+        ax2.scatter(optimal['max_sharpe_volatility'], optimal['max_sharpe_return'],
+                    c='red', s=100, marker='*', label='最优组合')
+        plt.colorbar(scatter, ax=ax2, label='夏普比率')
+    else:
+        ax2.scatter(results[:, 1], results[:, 0], alpha=0.3, s=1)
+
+    ax2.set_xlabel('波动率（风险）')
+    ax2.set_ylabel('预期收益')
+    ax2.set_title('投资组合有效前沿')
+    ax2.legend()
+    ax2.grid(True)
+
+    # 3. 相关性热力图
+    corr_matrix = returns.corr()
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0, ax=ax3,
+                xticklabels=['贵州茅台', '五粮液', '中国平安'],
+                yticklabels=['贵州茅台', '五粮液', '中国平安'])
+    ax3.set_title('资产间相关性矩阵')
+
+    # 4. 最优组合权重
+    if optimal is not None:
+        assets = ['贵州茅台', '五粮液', '中国平安']
+        ax4.pie(optimal['max_sharpe_weights'], labels=assets, autopct='%1.1f%%')
+        ax4.set_title('最优组合资产配置')
+    else:
+        ax4.text(0.5, 0.5, '无有效最优组合', ha='center', va='center',
+                 transform=ax4.transAxes, fontsize=12)
+        ax4.set_title('最优组合资产配置')
+
+    plt.tight_layout()
+    plt.show()
+
+
+def main():
+    """主函数"""
+    try:
+        setup_plot_style()
+
+        # 1. 数据获取与处理
+        prices = download_stock_data()
+        returns = calculate_returns(prices)
+
+        print(f"数据统计期间：{returns.index[0].strftime('%Y-%m-%d')} 至 {returns.index[-1].strftime('%Y-%m-%d')}")
+        print(f"总交易日数：{len(returns)}")
+
+        # 2. 单资产分析
+        print("\n=== 单只资产表现分析 ===")
+        asset_stats = analyze_individual_assets(returns)
+        print(asset_stats.round(4))
+
+        # 3. 投资组合分析
+        print("\n=== 投资组合优化分析 ===")
+        results, weights_record = generate_random_portfolios(returns, 10000)
+        optimal = find_optimal_portfolio(returns, results, weights_record)
+
+        if optimal is not None:
+            print(f"最优组合年化收益：{optimal['max_sharpe_return']:.4f}")
+            print(f"最优组合年化波动：{optimal['max_sharpe_volatility']:.4f}")
+            print(f"最优夏普比率：{optimal['max_sharpe_return'] / optimal['max_sharpe_volatility']:.4f}")
+
+            print("\n最优权重配置：")
+            stock_names = ['贵州茅台(600519.SH)', '五粮液(000858.SZ)', '中国平安(601318.SH)']
+            for i, stock in enumerate(stock_names):
+                print(f"{stock}: {optimal['max_sharpe_weights'][i]:.4f}")
+        else:
+            print("未找到有效的最优组合")
+
+        # 4. 可视化分析
+        plot_analysis(returns, results, optimal)
+
+        # 5. 风险分散效果验证
+        if optimal is not None:
+            print("\n=== 风险分散效果验证 ===")
+            individual_volatility = asset_stats['年化波动率'].values
+            portfolio_volatility = optimal['max_sharpe_volatility']
+            diversification_benefit = (1 - portfolio_volatility / np.mean(individual_volatility)) * 100
+
+            print(f"平均单资产波动率：{np.mean(individual_volatility):.4f}")
+            print(f"组合波动率：{portfolio_volatility:.4f}")
+            print(f"风险分散收益：{diversification_benefit:.2f}%")
+
+    except Exception as e:
+        print(f"分析过程中出现错误：{e}")
+        import traceback
+        traceback.print_exc()
+
+
+if __name__ == "__main__":
+    main()
